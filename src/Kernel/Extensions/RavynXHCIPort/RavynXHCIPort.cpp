@@ -492,6 +492,29 @@ bool RavynXHCIPort::startA733(IOService *provider)
     return true;
 }
 
+#define kInterruptControllerWaitNS (5ULL * 1000 * 1000 * 1000)
+
+// the gic's spi controller registers from a thread of its own and publishes its device tree
+// name as a resource once it can deliver. a nub's interrupt is usable after that
+static bool
+interruptControllerReady(IOService *provider)
+{
+    OSArray *names = OSDynamicCast(OSArray, provider->getProperty("IOInterruptControllers"));
+    OSString *parent = names ? OSDynamicCast(OSString, names->getObject(0)) : NULL;
+    OSDictionary *match;
+    IOService *found = NULL;
+
+    if (!parent) return false;
+    match = IOService::resourceMatching(parent);
+    if (match) {
+        found = IOService::waitForMatchingService(match, kInterruptControllerWaitNS);
+        match->release();
+    }
+    if (!found) return false;
+    found->release();
+    return true;
+}
+
 // x13s usb_1: the firmware leaves the core clocked, powered, in host mode and halted
 // across ExitBootServices, so nothing here writes. A core whose clock is gated never
 // answers the first read and the boot stops, so that read is logged first
@@ -521,6 +544,14 @@ bool RavynXHCIPort::startSC8280XP(IOService *provider)
     // HCCPARAMS1.AC64 is set, so buffers may sit above 4 GiB. Page alignment keeps each
     // one off cache lines the cpu shares with anything else, which dmaFlush relies on
     fDMAMask = 0xFFFFFFFFFFFFF000ULL;
+
+    UInt32 poll = 0;
+    if (PE_parse_boot_argn("pdxhci_poll", &poll, sizeof(poll)) && poll)
+        XHCI_Log("sc8280xp: pdxhci_poll set, polled");
+    else if (!interruptControllerReady(provider))
+        XHCI_Log("sc8280xp: %s has no usable interrupt, polled", provider->getName());
+    else
+        fPlatformInterrupt = true;
     return true;
 }
 
@@ -580,8 +611,11 @@ bool RavynXHCIPort::start(IOService *provider)
     fWorkLoop = NULL;
     fInterruptSource = NULL;
     fInterruptsEnabled = false;
+    fPlatformInterrupt = false;
     fEventWaitLock = NULL;
     fEventWaitChannel = 0;
+    fPortChangePending = false;
+    fHotplugWaitChannel = 0;
     fUSBBus = NULL;
 
     if (fPCI) {
@@ -687,7 +721,7 @@ bool RavynXHCIPort::start(IOService *provider)
      * a failed registration here just leaves fInterruptsEnabled false and
      * everything behaves exactly as before. */
     fEventWaitLock = IOLockAlloc();
-    fWorkLoop = (fEventWaitLock && fPCI) ? IOWorkLoop::workLoop() : NULL;
+    fWorkLoop = (fEventWaitLock && (fPCI || fPlatformInterrupt)) ? IOWorkLoop::workLoop() : NULL;
     if (fWorkLoop) {
         fInterruptSource = IOInterruptEventSource::interruptEventSource(
             this, &RavynXHCIPort::interruptOccurredStatic, fProvider, 0);
@@ -695,7 +729,7 @@ bool RavynXHCIPort::start(IOService *provider)
             fInterruptSource->enable();
             opWrite32(XHCI_USBCMD, opRead32(XHCI_USBCMD) | XHCI_USBCMD_INTE);
             fInterruptsEnabled = true;
-            XHCI_Log("using MSI interrupt (source 0)");
+            XHCI_Log("using %s interrupt (source 0)", fPCI ? "MSI" : "device tree");
         } else {
             if (fInterruptSource) { fInterruptSource->release(); fInterruptSource = NULL; }
             XHCI_Log("MSI registration failed, event ring stays polling-only");
@@ -1127,8 +1161,10 @@ void RavynXHCIPort::interruptOccurredStatic(OSObject *owner, IOInterruptEventSou
 
 void RavynXHCIPort::interruptOccurred(IOInterruptEventSource *sender, int count)
 {
-    /* IMAN.IP (Interrupt Pending) is write-1-to-clear; ack it so the
-     * controller can post the next interrupt. */
+    /* USBSTS.EINT and IMAN.IP (Interrupt Pending) are write-1-to-clear, EINT
+     * first (xHCI 1.1 5.4.2). A level-triggered line stays asserted until IP
+     * is clear, so this ack is what lets the controller re-enable it. */
+    opWrite32(XHCI_USBSTS, XHCI_USBSTS_EINT);
     UInt32 iman = rtRead32(XHCI_RT_IR0 + XHCI_IR_IMAN);
     rtWrite32(XHCI_RT_IR0 + XHCI_IR_IMAN, iman);
 
@@ -1143,6 +1179,8 @@ void RavynXHCIPort::serviceEventRing()
      * event and files each completion into the per-(slot,DCI) transfer table
      * or the command-completion slot, so concurrent waiters (disk I/O + the
      * keyboard poll thread) never consume and discard each other's events. */
+    bool portChange = false;
+
     IOLockLock(fEventLock);
     for (;;) {
         dmaFlush(&fEventRing[fEventRingDequeue], sizeof(XHCITRB));
@@ -1174,6 +1212,9 @@ void RavynXHCIPort::serviceEventRing()
                 fXferDone[slot][dci].control = evControl;
                 fXferDone[slot][dci].pending = true;
             }
+        } else if (type == TRB_TYPE_PORT_STATUS_CHG) {
+            XHCI_Log("port status change event, port %u", (UInt32)(evParam >> 24) & 0xff);
+            portChange = true;
         }
 
         fEventRingDequeue++;
@@ -1185,6 +1226,13 @@ void RavynXHCIPort::serviceEventRing()
         rtWrite64(XHCI_RT_IR0 + XHCI_IR_ERDP, (newErdp & ~0xFULL) | XHCI_ERDP_EHB);
     }
     IOLockUnlock(fEventLock);
+
+    if (portChange && fEventWaitLock) {
+        IOLockLock(fEventWaitLock);
+        fPortChangePending = true;
+        IOLockWakeup(fEventWaitLock, &fHotplugWaitChannel, true);
+        IOLockUnlock(fEventWaitLock);
+    }
 }
 
 bool RavynXHCIPort::doCommand(UInt64 param, UInt32 status, UInt32 controlNoCycle,
@@ -1392,6 +1440,9 @@ void RavynXHCIPort::hotplugLoop()
             bool connected = (portsc & XHCI_PORTSC_CCS) != 0;
 
             if (!connected) {
+                // a change bit left set blocks the ports next status change event
+                if (portsc & XHCI_PORTSC_RW1CS)
+                    portWrite32(p, XHCI_PORTSC, (portsc & ~XHCI_PORTSC_PR) & ~XHCI_PORTSC_PED);
                 if (fPortOccupied[p])
                     handleRootPortDisconnect(p, portsc);
                 fPortOccupied[p] = false;   /* allow a future replug on this port */
@@ -1407,7 +1458,18 @@ void RavynXHCIPort::hotplugLoop()
             if (!resetAndEnumeratePort(p) && ++fResetTries[p] < 5) fPortOccupied[p] = false;
         }
         pollHubPorts();
-        IOSleep(500);
+        if (fInterruptsEnabled) {
+            // a port status change event ends the wait early, the deadline still covers hubs
+            AbsoluteTime deadline;
+            clock_interval_to_deadline(500, kMillisecondScale, &deadline);
+            IOLockLock(fEventWaitLock);
+            if (!fPortChangePending)
+                IOLockSleepDeadline(fEventWaitLock, &fHotplugWaitChannel, deadline, THREAD_UNINT);
+            fPortChangePending = false;
+            IOLockUnlock(fEventWaitLock);
+        } else {
+            IOSleep(500);
+        }
     }
 }
 
