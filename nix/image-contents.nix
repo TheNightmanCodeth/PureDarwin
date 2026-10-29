@@ -730,7 +730,12 @@ let
         ];
       };
       kcArm64Sun50iDebugBuild = boardKc "sun50i" kernelArm64Sun50iDebugBuild { };
-      kcArm64Sc8280xpReleaseBuild = boardKc "sc8280xp" kernelArm64Sc8280xpBuild { };
+      kcArm64Sc8280xpReleaseBuild = boardKc "sc8280xp" kernelArm64Sc8280xpBuild {
+        extraKexts = [
+          "${drmMsmArm64Build}/System/Library/Extensions/PDDRMDri.kext"
+          "${drmMsmArm64Build}/System/Library/Extensions/PDDRMmsm.kext"
+        ];
+      };
       kcArm64Sc8280xpDebugBuild = boardKc "sc8280xp" kernelArm64Sc8280xpDebugBuild { };
       kcArm64Sdm670Build = boardKc "sdm670" kernelArm64Sdm670Build { };
       prelinkedArm32Bcm2835Build =
@@ -961,6 +966,7 @@ let
       ramdiskArm64Sc8280xpBuild = ramdiskArm64T8010Build.override {
         kc = kcArm64Sc8280xpReleaseBuild;
         xnuLoader = xnuLoaderArm64Sc8280xp;
+        extraPackages = [ zshArm64Build libiconvArm64Build toyboxArm64Build adrenoFirmwareBuild ];
         bootArgs = "-v debug=0x218 -nogzalloc_mode keepsyms=1 serial=0 rd=md0 hid-legacy-shim=1";
       };
       # the pixel 3a (sdm670): the sc8280xp kernel and collection, whose kernel hardcodes nothing past the arm
@@ -1222,6 +1228,21 @@ let
         cp ${pkgs.linux-firmware.src}/LICENSES/LICENSE.QualcommAtheros_ath10k $fw/ 2>/dev/null || \
           cp ${pkgs.linux-firmware.src}/LICENSE.QualcommAtheros_ath10k $fw/
       '';
+      # adreno a690: a660 sqe and gmu images and lenovo's zap shader, under LICENSE.qcom
+      adrenoFirmwareBuild = pkgs.runCommand "puredarwin-adreno-firmware" { } ''
+        fw=$out/Library/Firmware/qcom
+        mkdir -p $fw/sc8280xp/LENOVO/21BX
+        for f in a660_sqe.fw a660_gmu.bin sc8280xp/LENOVO/21BX/qcdxkmsuc8280.mbn; do
+          src=${pkgs.linux-firmware}/lib/firmware/qcom/$f
+          if [ -e "$src.zst" ]; then ${pkgs.zstd}/bin/zstd -dqf "$src.zst" -o $fw/$f
+          elif [ -e "$src.xz" ]; then ${pkgs.xz}/bin/xz -dc "$src.xz" > $fw/$f
+          else cp -L "$src" $fw/$f
+          fi
+        done
+        for l in LICENSE.qcom NOTICE.qcom; do
+          cp ${pkgs.linux-firmware.src}/LICENSES/$l $fw/ 2>/dev/null || cp ${pkgs.linux-firmware.src}/$l $fw/
+        done
+      '';
       strippedExtraPackages = lib.filter lib.isDerivation (
         [
           rtw89FirmwareBuild
@@ -1229,6 +1250,7 @@ let
           iwnFirmwareBuild
           runFirmwareBuild
           qwxFirmwareBuild
+          adrenoFirmwareBuild
           pd.localeData
           pd.corefoundation
           pd.icu
