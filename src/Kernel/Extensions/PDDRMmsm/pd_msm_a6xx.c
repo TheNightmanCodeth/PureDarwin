@@ -478,16 +478,11 @@ ring_space(struct pd_msm_gpu *g)
 static int
 ring_reserve(struct pd_msm_dev *mdev, u32 n)
 {
-    struct pd_msm_gpu *g = &mdev->gpu;
+    // one dword stays unused to distinguish full from empty
+    if (n >= RING_DWORDS)
+        return -E2BIG;
     
-    for (int i = 0; i < 100000; i++) {
-        if (ring_space(g) >= n)
-            return 0;
-        udelay(10);
-    }
-    printf("pd msm: a6xx: ring full: rptr %u wptr %u status 0x%08x\n", ring_rptr(g), g->wptr,
-           gpu_read(mdev, RBBM_STATUS));
-    return -EBUSY;
+    return ring_space(&mdev->gpu) >= n ? 0 : -EAGAIN;
 }
 
 static int

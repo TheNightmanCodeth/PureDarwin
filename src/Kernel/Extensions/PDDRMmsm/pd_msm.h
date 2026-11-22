@@ -27,7 +27,8 @@ struct pd_msm_bo {
 	u32			nchunks;
 	u64			iova;		// 0 until the gpu needs it
 	u32			flags;
-	u32			last_fence;	// seqno of the last submit that used it
+    // seqno of the last submit that used it. gpu.lock while live, stable at final release
+	u32			last_fence;
 	char			name[32];
 };
 
@@ -139,7 +140,7 @@ extern u64 pd_msm_dma_max;
 int pd_msm_gpu_init(struct pd_msm_dev *mdev);
 int pd_msm_gpu_start(struct pd_msm_dev *mdev);
 int pd_msm_gpu_submit(struct pd_msm_dev *mdev, struct drm_file *file, const u64 *ib_iova,
-    const u32 *ib_dwords, int nib, u32 *seqno);
+    const u32 *ib_dwords, int nib, struct pd_msm_bo *const *bos, u32 nr_bos, u32 *seqno);
 u32 pd_msm_gpu_completed(struct pd_msm_dev *mdev);
 // waits for seqno up to timeout_ns, 0 or -ETIMEDOUT
 int pd_msm_gpu_wait(struct pd_msm_dev *mdev, u32 seqno, s64 timeout_ns);

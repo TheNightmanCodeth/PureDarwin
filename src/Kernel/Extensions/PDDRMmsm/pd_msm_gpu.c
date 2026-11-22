@@ -64,8 +64,10 @@ selftest(struct pd_msm_dev *mdev)
     }
     n = f->selftest_ib(ib->cpu, dst->iova, 0xc0ffee01);
     iova = ib->iova;
+    struct pd_msm_bo *submit_bos[] = { ib, dst };
     wmb();
-    if ((error = pd_msm_gpu_submit(mdev, NULL, &iova, &n, 1, &seqno)) != 0) {
+    error = pd_msm_gpu_submit(mdev, NULL, &iova, &n, 1, submit_bos, nitems(submit_bos), &seqno);
+    if (error != 0) {
         printf("pd msm: selftest: submit %d\n", error);
         return;
     }
@@ -189,26 +191,90 @@ pd_msm_gpu_start(struct pd_msm_dev *mdev)
 	return (error);
 }
 
+// called without gpu.lock
+// wake on completion or shutdown. a bounded timer lets us recheck
+// ring progress that occurs without a new fence interrupt
+static int
+ring_wait_progress(struct pd_msm_dev *mdev, u32 observed, u64 remaining_ns)
+{
+    struct pd_msm_gpu *g = &mdev->gpu;
+    // cap at 1ms -- probably should be lower than this
+    u64 slice_ns = min_t(u64, remaining_ns, 1000000ull);
+    s64 usec = (s64)(slice_ns / 1000 + (slice_ns % 1000 != 0));
+    int state = pdos_wait_lock();
+    int error = g->fence_error;
+    
+    // recheck after acquiring the wait lock. if a completion happened between dropping
+    // gpu.lock and getting here, retry immediately.
+    if (error == 0 && pd_msm_gpu_completed(mdev) == observed) {
+        (void)pdos_wait_sleep(&g->fence_event, usec, 0, &state);
+        error = g->fence_error;
+    }
+    
+    pdos_wait_unlock(state);
+    return error;
+}
+
 int
 pd_msm_gpu_submit(struct pd_msm_dev *mdev, struct drm_file *file, const u64 *ib_iova,
-    const u32 *ib_dwords, int nib, u32 *seqno)
+    const u32 *ib_dwords, int nib, struct pd_msm_bo *const *bos, u32 nr_bos, u32 *seqno)
 {
 	struct pd_msm_gpu *g = &mdev->gpu;
-	int error;
-
-    mutex_lock(&g->lock);
-    if (g->stopping || !g->running) {
+    const u64 budget_ns = 1000000000ull;
+    u64 start = ktime_get_ns();
+    
+    for (;;) {
+        u32 observed, candidate;
+        u64 elapsed;
+        int error;
+        
+        mutex_lock(&g->lock);
+        
+        if (g->stopping || !g->running) {
+            mutex_unlock(&g->lock);
+            return (-ENODEV);
+        }
+        
+        int state = pdos_wait_lock();
+        error = g->fence_error;
+        pdos_wait_unlock(state);
+        if (error != 0) {
+            mutex_unlock(&g->lock);
+            return error;
+        }
+        
+        // snapshot before testing space: a completion during the failed attempt must prevent an
+        // unnecessary sleep
+        observed = pd_msm_gpu_completed(mdev);
+        candidate = g->seqno + 1;
+        
+        error = mdev->info->funcs->submit(
+            mdev, file, ib_iova, ib_dwords, nib, candidate);
+        
+        if (error == 0) {
+            // gpu.lock still held. publish all BO fences before another submission can acquire
+            // a newer sequence number
+            for (u32 i = 0; i < nr_bos; i++)
+                bos[i]->last_fence = candidate;
+            
+            g->seqno = candidate;
+            g->last_ctx = file;
+            *seqno = candidate;
+        }
+        
         mutex_unlock(&g->lock);
-        return (-ENODEV);
+        
+        if (error != -EAGAIN)
+            return error;
+        
+        elapsed = ktime_get_ns() - start;
+        if (elapsed >= budget_ns)
+            return -EBUSY; // preserve the existing ring-full error
+        
+        error = ring_wait_progress(mdev, observed, budget_ns - elapsed);
+        if (error != 0)
+            return error;
     }
-	*seqno = g->seqno + 1;
-	error = mdev->info->funcs->submit(mdev, file, ib_iova, ib_dwords, nib, *seqno);
-	if (error == 0) {
-		g->seqno = *seqno;
-		g->last_ctx = file;
-	}
-	mutex_unlock(&g->lock);
-	return (error);
 }
 
 u32

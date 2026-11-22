@@ -211,7 +211,9 @@ gem_cpu_prep(struct drm_device *drm, void *data, struct drm_file *file)
 	obj = drm_gem_object_lookup(file, req->handle);
 	if (obj == NULL)
 		return (-ENOENT);
+    mutex_lock(&mdev->gpu.lock);
 	fence = to_pd_msm_bo(obj)->last_fence;
+    mutex_unlock(&mdev->gpu.lock);
 	if (fence != 0 && (s32)(pd_msm_gpu_completed(mdev) - fence) < 0) {
 		if ((req->op & MSM_PREP_NOSYNC) != 0)
 			error = -EBUSY;
@@ -299,9 +301,7 @@ gem_submit(struct drm_device *drm, void *data, struct drm_file *file)
 		case MSM_SUBMIT_CMD_BUF:
 			break;
 		case MSM_SUBMIT_CMD_CTX_RESTORE_BUF:
-			// only needed when another context ran in between
-			if (mdev->gpu.last_ctx == file)
-				continue;
+			// another context may run while this submission waits
 			break;
 		case MSM_SUBMIT_CMD_IB_TARGET_BUF:
 			continue;
@@ -313,12 +313,9 @@ gem_submit(struct drm_device *drm, void *data, struct drm_file *file)
 		ib_dwords[nib] = c->size / 4;
 		nib++;
 	}
-	error = pd_msm_gpu_submit(mdev, file, ib_iova, ib_dwords, nib, &seqno);
-	if (error == 0) {
-		for (u32 i = 0; i < req->nr_bos; i++)
-			bos[i]->last_fence = seqno;
-		req->fence = seqno;
-	}
+	error = pd_msm_gpu_submit(mdev, file, ib_iova, ib_dwords, nib, bos, req->nr_bos, &seqno);
+	if (error == 0)
+        req->fence = seqno;
 out:
 	for (u32 i = 0; bos != NULL && i < req->nr_bos; i++) {
 		if (bos[i] != NULL)
