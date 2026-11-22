@@ -1483,17 +1483,20 @@ pdos_intr_install(void *dev, int index, pdos_intr_fn fn, void *arg)
 	return intr;
 }
 
-void
+int
 pdos_intr_remove(void *cookie)
 {
-	PDFBSD_INTR_CLASS *intr = (PDFBSD_INTR_CLASS *)cookie;
-	if (intr == NULL)
-		return;
-	intr->source->disable();
-	intr->workLoop->removeEventSource(intr->source);
-	OSSafeReleaseNULL(intr->source);
-	OSSafeReleaseNULL(intr->workLoop);
-	intr->release();
+    PDFBSD_INTR_CLASS *intr = (PDFBSD_INTR_CLASS *)cookie;
+    if (intr == NULL)
+        return kIOReturnBadArgument;
+    intr->source->disable();
+    int error = intr->workLoop->removeEventSource(intr->source);
+    if (error != 0)
+        return error;
+    OSSafeReleaseNULL(intr->source);
+    OSSafeReleaseNULL(intr->workLoop);
+    intr->release();
+    return 0;
 }
 
 // device tree access for platform devices

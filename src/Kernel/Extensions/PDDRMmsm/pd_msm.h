@@ -61,6 +61,7 @@ struct pd_msm_gpu_funcs {
 	void			(*dump)(struct pd_msm_dev *mdev);
     // the self-test's ib: a marker write of value to dst, returns its length in dwords
     u32             (*selftest_ib)(u32 *ib, u64 dst, u32 value);
+    int         (*irq_stop)(struct pd_msm_dev *mdev);
 };
 
 // one chip, from the compatible's match data: what userspace is told and how it is driven
@@ -83,19 +84,26 @@ struct pd_msm_info {
 };
 
 struct pd_msm_gpu {
-	void __iomem		*mmio;
-	const struct pd_msm_iommu *iommu;
-	void			*iommu_priv;
-	struct pd_msm_bo	*ring;
-	struct pd_msm_bo	*memptrs;	// fence word at offset 0
-	u32			wptr;		// in dwords
-	u32			seqno;		// last one handed out
-	struct mutex		lock;		// ring, seqno and the gpu va allocator
-	struct mutex		start_lock;	// the first open's microcode load and cp start
-	u64			va_next;
-	struct drm_file		*last_ctx;
-	bool			running;
-    void            *gen;           // the generation's state
+	void __iomem		        *mmio;
+	const struct pd_msm_iommu   *iommu;
+	void			            *iommu_priv;
+	struct pd_msm_bo	        *ring;
+	struct pd_msm_bo	        *memptrs;	// fence word at offset 0
+	u32			                wptr;		// in dwords
+	u32			                seqno;		// last one handed out
+	struct mutex		        lock;		// ring, seqno and the gpu va allocator
+	struct mutex		        start_lock;	// the first open's microcode load and cp start
+	u64			                va_next;
+	struct drm_file		        *last_ctx;
+	bool			            running;
+    void                        *gen;           // the generation's state
+    char                        fence_event;
+    int                         fence_error;
+    bool                        irq_fences;
+    bool                        stopping;       // protected by gpu.lock. terminal for this device
+    // protected by pdos_wait_lock()
+    unsigned int                active_ops;
+    char                        drain_event;
 };
 
 struct pd_msm_dev {
@@ -107,6 +115,10 @@ struct pd_msm_dev {
 	struct clk		*core_clk;
 	struct pd_msm_gpu	gpu;
 };
+
+int pd_msm_op_enter(struct pd_msm_dev *mdev);
+void pd_msm_op_leave(struct pd_msm_dev *mdev);
+int pd_msm_gpu_shutdown(struct pd_msm_dev *mdev);
 
 #define to_pd_msm(d)	container_of((d), struct pd_msm_dev, drm)
 

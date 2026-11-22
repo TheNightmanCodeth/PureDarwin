@@ -182,6 +182,25 @@ pd_lkpi_platform_attach(const struct pd_fbsd_platform *pd)
 	return (dev);
 }
 
+void
+pd_fbsd_shutdown_platform_device(void *cookie)
+{
+    struct device *dev = cookie;
+    struct platform_device *pdev;
+    struct platform_driver *pdrv;
+    
+    if (dev == NULL || !pd_dev_is_platform(dev) || dev->driver == NULL)
+        return;
+    
+    pdev = to_platform_device(dev);
+    pdrv = container_of(dev->driver, struct platform_driver, driver);
+    
+    linux_set_current(curthread);
+    
+    if (pdrv->shutdown != NULL)
+        pdrv->shutdown(pdev);
+}
+
 struct resource *
 platform_get_resource(struct platform_device *pdev, unsigned int type, unsigned int num)
 {
@@ -359,13 +378,30 @@ pd_platform_request_irq(unsigned int irq, irq_handler_t handler, irq_handler_t t
 void
 pd_platform_free_irq(unsigned int irq, void *arg)
 {
-	for (int i = 0; i < nitems(sIrqs); i++) {
-		struct pd_platform_irq *pi = &sIrqs[i];
+    pd_platform_free_irq_checked(irq, arg);
+}
 
-		if (pi->irq == irq && (pi->handler != NULL || pi->thread_handler != NULL)) {
-			remove_io_interrupt_handler(irq, pd_platform_irq_handler, pi);
-			memset(pi, 0, sizeof(*pi));
-			return;
-		}
-	}
+int
+pd_platform_free_irq_checked(unsigned int irq, void *arg)
+{
+    for (int i = 0; i < nitems(sIrqs); i++) {
+        struct pd_platform_irq *pi = &sIrqs[i];
+        
+        if (pi->irq != irq || pi->arg != arg ||
+            (pi->handler == NULL && pi->thread_handler == NULL))
+            continue;
+        
+        int status = remove_io_interrupt_handler(irq, pd_platform_irq_handler, pi);
+        
+        if (status != 0) {
+            printf("pd platform: irq %u removal failed: %d\n",
+                   irq, status);
+            return -EIO;
+        }
+        
+        memset(pi, 0, sizeof(*pi));
+        return 0;
+    }
+    
+    return -ENOENT;
 }

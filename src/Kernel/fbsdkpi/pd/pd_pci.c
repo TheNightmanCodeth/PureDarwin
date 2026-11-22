@@ -481,7 +481,10 @@ remove_io_interrupt_handler(int32 vector, interrupt_handler handler, void *data)
 	for (int i = 0; i < PD_HANDLER_SLOTS; i++) {
 		struct pd_handler *h = &sHandlers[i];
 		if (h->handler == handler && h->data == data && h->vector == vector) {
-			pdos_intr_remove(h->cookie);
+            int error = pdos_intr_remove(h->cookie);
+            if (error != 0)
+                return B_ERROR;
+            
 			h->handler = NULL;
 			return B_OK;
 		}

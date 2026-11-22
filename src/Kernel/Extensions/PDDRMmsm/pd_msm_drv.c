@@ -389,24 +389,55 @@ submitqueue_query(struct drm_device *drm, void *data, struct drm_file *file)
 	return (0);
 }
 
+#define PD_MSM_GUARD_IOCTL(fn)                                      \
+static int                                                         \
+fn##_guarded(struct drm_device *drm, void *data,                     \
+    struct drm_file *file)                                         \
+{                                                                  \
+    struct pd_msm_dev *mdev = to_pd_msm(drm);                        \
+    int error = pd_msm_op_enter(mdev);                              \
+                                                                   \
+    if (error != 0)                                                \
+        return error;                                              \
+                                                                   \
+    error = fn(drm, data, file);                                    \
+    pd_msm_op_leave(mdev);                                          \
+    return error;                                                  \
+}
+
+PD_MSM_GUARD_IOCTL(get_param)
+PD_MSM_GUARD_IOCTL(set_param)
+PD_MSM_GUARD_IOCTL(gem_new)
+PD_MSM_GUARD_IOCTL(gem_info)
+PD_MSM_GUARD_IOCTL(gem_cpu_prep)
+PD_MSM_GUARD_IOCTL(gem_cpu_fini)
+PD_MSM_GUARD_IOCTL(gem_submit)
+PD_MSM_GUARD_IOCTL(wait_fence)
+PD_MSM_GUARD_IOCTL(gem_madvise)
+PD_MSM_GUARD_IOCTL(submitqueue_new)
+PD_MSM_GUARD_IOCTL(submitqueue_close)
+PD_MSM_GUARD_IOCTL(submitqueue_query)
+
+#undef PD_MSM_GUARD_IOCTL
+
 static const struct drm_ioctl_desc pd_msm_ioctls[] = {
-	DRM_IOCTL_DEF_DRV(MSM_GET_PARAM, get_param, DRM_RENDER_ALLOW),
-	DRM_IOCTL_DEF_DRV(MSM_SET_PARAM, set_param, DRM_RENDER_ALLOW),
-	DRM_IOCTL_DEF_DRV(MSM_GEM_NEW, gem_new, DRM_RENDER_ALLOW),
-	DRM_IOCTL_DEF_DRV(MSM_GEM_INFO, gem_info, DRM_RENDER_ALLOW),
-	DRM_IOCTL_DEF_DRV(MSM_GEM_CPU_PREP, gem_cpu_prep, DRM_RENDER_ALLOW),
-	DRM_IOCTL_DEF_DRV(MSM_GEM_CPU_FINI, gem_cpu_fini, DRM_RENDER_ALLOW),
-	DRM_IOCTL_DEF_DRV(MSM_GEM_SUBMIT, gem_submit, DRM_RENDER_ALLOW),
-	DRM_IOCTL_DEF_DRV(MSM_WAIT_FENCE, wait_fence, DRM_RENDER_ALLOW),
-	DRM_IOCTL_DEF_DRV(MSM_GEM_MADVISE, gem_madvise, DRM_RENDER_ALLOW),
-	DRM_IOCTL_DEF_DRV(MSM_SUBMITQUEUE_NEW, submitqueue_new, DRM_RENDER_ALLOW),
-	DRM_IOCTL_DEF_DRV(MSM_SUBMITQUEUE_CLOSE, submitqueue_close, DRM_RENDER_ALLOW),
-	DRM_IOCTL_DEF_DRV(MSM_SUBMITQUEUE_QUERY, submitqueue_query, DRM_RENDER_ALLOW),
+    DRM_IOCTL_DEF_DRV(MSM_GET_PARAM, get_param_guarded, DRM_RENDER_ALLOW),
+    DRM_IOCTL_DEF_DRV(MSM_SET_PARAM, set_param_guarded, DRM_RENDER_ALLOW),
+    DRM_IOCTL_DEF_DRV(MSM_GEM_NEW, gem_new_guarded, DRM_RENDER_ALLOW),
+    DRM_IOCTL_DEF_DRV(MSM_GEM_INFO, gem_info_guarded, DRM_RENDER_ALLOW),
+    DRM_IOCTL_DEF_DRV(MSM_GEM_CPU_PREP, gem_cpu_prep_guarded, DRM_RENDER_ALLOW),
+    DRM_IOCTL_DEF_DRV(MSM_GEM_CPU_FINI, gem_cpu_fini_guarded, DRM_RENDER_ALLOW),
+    DRM_IOCTL_DEF_DRV(MSM_GEM_SUBMIT, gem_submit_guarded, DRM_RENDER_ALLOW),
+    DRM_IOCTL_DEF_DRV(MSM_WAIT_FENCE, wait_fence_guarded, DRM_RENDER_ALLOW),
+    DRM_IOCTL_DEF_DRV(MSM_GEM_MADVISE, gem_madvise_guarded, DRM_RENDER_ALLOW),
+    DRM_IOCTL_DEF_DRV(MSM_SUBMITQUEUE_NEW, submitqueue_new_guarded, DRM_RENDER_ALLOW),
+    DRM_IOCTL_DEF_DRV(MSM_SUBMITQUEUE_CLOSE, submitqueue_close_guarded, DRM_RENDER_ALLOW),
+    DRM_IOCTL_DEF_DRV(MSM_SUBMITQUEUE_QUERY, submitqueue_query_guarded, DRM_RENDER_ALLOW),
 };
 
 // the gpu starts on its first user, when /Library/Firmware is surely mounted
 static int
-pd_msm_open(struct drm_device *drm, struct drm_file *file)
+pd_msm_open_impl(struct drm_device *drm, struct drm_file *file)
 {
 	int error = pd_msm_gpu_start(to_pd_msm(drm));
 
@@ -414,6 +445,20 @@ pd_msm_open(struct drm_device *drm, struct drm_file *file)
 		return (error);
 	file->driver_priv = kzalloc(sizeof(struct pd_msm_file), GFP_KERNEL);
 	return (file->driver_priv != NULL ? 0 : -ENOMEM);
+}
+
+static int
+pd_msm_open(struct drm_device *drm, struct drm_file *file)
+{
+    struct pd_msm_dev *mdev = to_pd_msm(drm);
+    int error = pd_msm_op_enter(mdev);
+    
+    if (error != 0)
+        return error;
+    
+    error = pd_msm_open_impl(drm, file);
+    pd_msm_op_leave(mdev);
+    return error;
 }
 
 static void
@@ -477,9 +522,23 @@ static const struct of_device_id pd_msm_match[] = {
 	{ }
 };
 
+static void
+pd_msm_shutdown(struct platform_device *pdev)
+{
+    struct pd_msm_dev *mdev = platform_get_drvdata(pdev);
+    
+    if (mdev == NULL)
+        return;
+    
+    int error = pd_msm_gpu_shutdown(mdev);
+    if (error != 0)
+        dev_err(&pdev->dev, "shutdown failed: %d\n", error);
+}
+
 static struct platform_driver pd_msm_platform_driver = {
 	.probe = pd_msm_probe,
 	.driver = { .name = "pd-msm", .of_match_table = pd_msm_match },
+    .shutdown = pd_msm_shutdown,
 };
 
 // each soc's clock and power provider goes in before the gpu can probe, they match by

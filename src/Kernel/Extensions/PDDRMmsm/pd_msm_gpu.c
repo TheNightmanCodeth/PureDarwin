@@ -18,6 +18,32 @@ int pd_msm_stage(void)
     return (pdos_bootarg_int("pdmsmstage", 0));
 }
 
+int
+pd_msm_op_enter(struct pd_msm_dev *mdev)
+{
+    struct pd_msm_gpu *g = &mdev->gpu;
+    int state = pdos_wait_lock();
+    int error = g->fence_error;
+    
+    if (error == 0)
+        g->active_ops++;
+    
+    pdos_wait_unlock(state);
+    return error;
+}
+
+void
+pd_msm_op_leave(struct pd_msm_dev *mdev)
+{
+    struct pd_msm_gpu *g = &mdev->gpu;
+    int state = pdos_wait_lock();
+    
+    if (--g->active_ops == 0)
+        pdos_wakeup(&g->drain_event, 1);
+    
+    pdos_wait_unlock(state);
+}
+
 static void
 selftest(struct pd_msm_dev *mdev)
 {
@@ -146,11 +172,17 @@ pd_msm_gpu_start(struct pd_msm_dev *mdev)
 	int error = 0;
 
 	mutex_lock(&g->start_lock);
-	if (!g->running) {
+    mutex_lock(&g->lock);
+    if (g->stopping) {
+        error = -ENODEV;
+    } else if (!g->running) {
+        mutex_unlock(&g->lock); // start can acquire this
 		error = mdev->info->funcs->start(mdev);
+        mutex_lock(&g->lock);
 		g->running = error == 0;
         first = g->running;
 	}
+    mutex_unlock(&g->lock);
 	mutex_unlock(&g->start_lock);
     if (first)
         selftest(mdev);
@@ -164,9 +196,11 @@ pd_msm_gpu_submit(struct pd_msm_dev *mdev, struct drm_file *file, const u64 *ib_
 	struct pd_msm_gpu *g = &mdev->gpu;
 	int error;
 
-	if (!g->running)
-		return (-ENODEV);
-	mutex_lock(&g->lock);
+    mutex_lock(&g->lock);
+    if (g->stopping || !g->running) {
+        mutex_unlock(&g->lock);
+        return (-ENODEV);
+    }
 	*seqno = g->seqno + 1;
 	error = mdev->info->funcs->submit(mdev, file, ib_iova, ib_dwords, nib, *seqno);
 	if (error == 0) {
@@ -183,25 +217,138 @@ pd_msm_gpu_completed(struct pd_msm_dev *mdev)
 	return (mdev->info->funcs->completed(mdev));
 }
 
-// polled for now, seqnos compare with wraparound
+static int
+pd_msm_gpu_wait_irq(struct pd_msm_dev *mdev, u32 target, s64 timeout_ns)
+{
+    struct pd_msm_gpu *g = &mdev->gpu;
+    u64 start = ktime_get_ns();
+    u64 budget = timeout_ns > 0 ? (u64)timeout_ns : 0;
+    int state = pdos_wait_lock();
+    int error;
+    
+    for (;;) {
+        if (g->fence_error != 0) {
+            // make terminal shutdown return an error even if an unobserved fence happened to complete
+            // More elaborate recovery can preserve individual fence results later
+            error = g->fence_error; // protected by pdos_wait_lock
+            break;
+        }
+        
+        u32 completed = pd_msm_gpu_completed(mdev);
+        
+        if ((s32)(completed - target) >= 0) {
+            rmb();
+            error = 0;
+            break;
+        }
+        
+        u64 elapsed = ktime_get_ns() - start;
+        if (elapsed >= budget) {
+            error = -ETIMEDOUT;
+            break;
+        }
+        
+        u64 remaining = budget - elapsed;
+        
+        s64 usec = (s64)(remaining / 1000 + (remaining % 1000 != 0));
+        
+        (void)pdos_wait_sleep(&g->fence_event, usec, 0, &state);
+    }
+    
+    pdos_wait_unlock(state);
+    return error;
+}
+
+
+// IRQ waits where supported or polling
 int
 pd_msm_gpu_wait(struct pd_msm_dev *mdev, u32 seqno, s64 timeout_ns)
 {
-	u64 start = ktime_get_ns(), deadline = start + (timeout_ns > 0 ? timeout_ns : 0);
+    struct pd_msm_gpu *g = &mdev->gpu;
+    
+    if (g->irq_fences)
+        return pd_msm_gpu_wait_irq(mdev, seqno, timeout_ns);
+    
+    u64 start = ktime_get_ns();
+    u64 budget = timeout_ns > 0 ? (u64)timeout_ns : 0;
     bool dumped = false;
 
 	for (;;) {
-		if ((s32)(pd_msm_gpu_completed(mdev) - seqno) >= 0)
-			break;
-		if (timeout_ns <= 0 || ktime_get_ns() >= deadline)
-			return (-ETIMEDOUT);
-        if (!dumped && ktime_get_ns() - start > 1000000000ull && mdev->info->funcs->dump != NULL) {
+        // fence_error is always under the wait lock
+        int state = pdos_wait_lock();
+        int error = g->fence_error;
+        pdos_wait_unlock(state);
+        
+        if (error != 0)
+            return error;
+        
+        if ((s32)(pd_msm_gpu_completed(mdev) - seqno) >= 0) {
+            rmb();
+            break;
+        }
+        
+        u64 elapsed = ktime_get_ns() - start;
+        if (elapsed >= budget)
+            return -ETIMEDOUT;
+        
+        if (!dumped && elapsed > 1000000000ull && mdev->info->funcs->dump != NULL) {
             mdev->info->funcs->dump(mdev);
             dumped = true;
         }
-		usleep_range(50, 100);
+        
+        usleep_range(50, 100);
 	}
 	if (mdev->info->funcs->fence_ack != NULL)
 		mdev->info->funcs->fence_ack(mdev);
 	return (0);
+}
+
+int
+pd_msm_gpu_shutdown(struct pd_msm_dev *mdev)
+{
+    struct pd_msm_gpu *g = &mdev->gpu;
+    int error = 0;
+    mutex_lock(&g->start_lock);
+    mutex_lock(&g->lock);
+    
+    g->stopping = true;
+    
+    int state = pdos_wait_lock();
+    g->fence_error = -ENODEV;
+    pdos_wakeup(&g->fence_event, 1);
+    pdos_wait_unlock(state);
+    
+    mutex_unlock(&g->lock);
+    
+    // detach IRQ here while startup remains excluded
+    // Don't hold gpu.lock or pdos_wait_lock() across IRQ removal
+    if (mdev->info->funcs->irq_stop != NULL)
+        error = mdev->info->funcs->irq_stop(mdev);
+    
+    mutex_unlock(&g->start_lock);
+    
+    // allow admitted operations up to five seconds to return
+    const u64 budget_ns = 5000000000ull;
+    u64 start = ktime_get_ns();
+    int drain_error = 0;
+    
+    state = pdos_wait_lock();
+    
+    while (g->active_ops != 0) {
+        u64 elapsed = ktime_get_ns() - start;
+        
+        if (elapsed >= budget_ns) {
+            drain_error = -ETIMEDOUT;
+            break;
+        }
+        
+        u64 remaining = budget_ns - elapsed;
+        s64 usec = (s64)(remaining / 1000 + (remaining % 1000 != 0));
+        // registers the wait, releases the wait lock while asleep and acquires it before returning
+        (void)pdos_wait_sleep(&g->drain_event, usec, 0, &state);
+    }
+    
+    pdos_wait_unlock(state);
+    
+    return error != 0 ? error : drain_error;
 }

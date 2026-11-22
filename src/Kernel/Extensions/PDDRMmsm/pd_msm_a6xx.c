@@ -6,6 +6,7 @@
 #include <linux/delay.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
+#include <linux/interrupt.h>
 
 #include "pd_fbsd_os.h"
 
@@ -171,6 +172,8 @@ a6xx_sip_c1b(void)
     return (out[0] == 0 ? 0 : -EIO);
 }
 
+#define RBBM_INT_0_MASK 0x0038
+
 static int
 a6xx_hw_init(struct pd_msm_dev *mdev, struct a6xx_state *st)
 {
@@ -243,7 +246,8 @@ a6xx_hw_init(struct pd_msm_dev *mdev, struct a6xx_state *st)
     gpu_write(mdev, 0x0011, 0);
     gpu_write(mdev, 0x0e3c, 0x00000090);
     gpu_write(mdev, 0x0844, 0x0000006e);
-    gpu_write(mdev, 0x0038, 0x03d0e242);
+    gpu_write(mdev, RBBM_INT_0_MASK, 0);
+//    gpu_write(mdev, 0x0038, 0x03d0e242);
     
     printf("pd msm: a6xx: gpu registers set, rbbm_status 0x%08x\n", gpu_read(mdev, 0x0210));
     return (a6xx_sip_c1b());
@@ -602,6 +606,7 @@ a6xx_init(struct pd_msm_dev *mdev)
         return (error);
     // zap shader: the gpu's zap-shader child names a reserved-memory node
     zap_np = of_get_child_by_name(mdev->pdev->dev.of_node, "zap-shader");
+    // TODO: get ZAP firmware name via `of_property_read_string(zap_np, "firmware-name", &zap_fw);
     mem_np = zap_np != NULL ? of_parse_phandle(zap_np, "memory-region", 0) : NULL;
     if (mem_np != NULL && of_address_to_resource(mem_np, 0, &res) == 0) {
         st->zap_phys = res.start;
@@ -658,6 +663,64 @@ stop_at(int stage)
     return (true);
 }
 
+static irqreturn_t
+a6xx_fence_irq(int irq, void *arg)
+{
+    struct pd_msm_dev *mdev = arg;
+    struct pd_msm_gpu *g = &mdev->gpu;
+    struct a6xx_state *st = g->gen;
+    u32 pending;
+    int state;
+    
+    (void)irq;
+    
+    gmu_write(st, GMU_PWR_COL_KEEPALIVE, 1);
+    
+    pending = gpu_read(mdev, RBBM_INT_0_STATUS);
+    pending &= INT0_CACHE_FLUSH_TS;
+    
+    if (pending != 0) {
+        // ack
+        gpu_write(mdev, RBBM_INT_CLEAR_CMD, pending);
+        
+        // read before dropping keepalive
+        (void)gpu_read(mdev, RBBM_INT_0_STATUS);
+    }
+    
+    gmu_write(st, GMU_PWR_COL_KEEPALIVE, 0);
+    
+    if (pending == 0)
+        return IRQ_NONE;
+    
+    state = pdos_wait_lock();
+    pdos_wakeup(&g->fence_event, 1); // wake all fence waiters
+    pdos_wait_unlock(state);
+    
+    return IRQ_HANDLED;
+}
+
+static int
+a6xx_irq_remove_oob_held(struct pd_msm_dev *mdev)
+{
+    struct a6xx_state *st = mdev->gpu.gen;
+    
+    if (!st->fence_irq_registered)
+        return 0;
+    
+    gpu_write(mdev, RBBM_INT_0_MASK, 0);
+    (void)gpu_read(mdev, RBBM_INT_0_MASK);
+    
+    int error = pd_platform_free_irq_checked(st->fence_irq, mdev);
+    if (error != 0)
+        return error;
+    
+    st->fence_irq_registered = false;
+    
+    gpu_write(mdev, RBBM_INT_CLEAR_CMD, INT0_CACHE_FLUSH_TS);
+    (void)gpu_read(mdev, RBBM_INT_0_STATUS);
+    return 0;
+}
+
 // the first open: firmware from /Library/Firmware, then the bring-up in spec 9.1's order
 static int
 a6xx_start(struct pd_msm_dev *mdev)
@@ -668,6 +731,7 @@ a6xx_start(struct pd_msm_dev *mdev)
     bool oob = false;
     int error;
     
+    // TODO: a6xx firmware _besides_ a660 (mdev->info->???)
     if ((error = request_firmware(&sqe, "qcom/a660_sqe.fw", dev)) != 0 ||
         (error = request_firmware(&gmu, "qcom/a660_gmu.bin", dev)) != 0 ||
         (error = request_firmware(&zap, "qcom/sc8280xp/LENOVO/21BX/qcdxkmsuc8280.mbn", dev)) != 0) {
@@ -702,41 +766,86 @@ a6xx_start(struct pd_msm_dev *mdev)
     
     if ((error = a6xx_gmu_power(mdev, st)) != 0)
         goto out;
-    if (stop_at(1)) {
-        error = -EAGAIN;
-        goto out;
-    }
+    
     if ((error = a6xx_gmu_load(mdev, st, gmu)) != 0 || (error = a6xx_gmu_start(mdev, st)) != 0)
         goto out;
-    if (stop_at(2)) {
-        error = -EAGAIN;
-        goto out;
-    }
+    
     if ((error = a6xx_gmu_oob_gpu(st, true)) != 0)
         goto out;
+    
     oob = true;
+    
     if ((error = a6xx_hw_init(mdev, st)) != 0 || (error = a6xx_cp_start(mdev, st)) != 0)
         goto out;
-    if (stop_at(3)) {
-        error = -EAGAIN;
-        goto out;
-    }
+    
     if (!st->zap_done) {
         if ((error = a6xx_zap(mdev, st, zap)) != 0)
             goto out;
         st->zap_done = true;
     }
+    
     if ((error = a6xx_secure_exit(mdev, st)) != 0)
         goto out;
-    if (stop_at(4)) {
-        error = -EAGAIN;
+    
+    int irq = platform_get_irq(mdev->pdev, 0);
+    
+    if (irq < 0) {
+        error = irq;
         goto out;
     }
+    
+    // clear stale completion status before enabling delivery
+    gpu_write(mdev, RBBM_INT_CLEAR_CMD, INT0_CACHE_FLUSH_TS);
+    (void)gpu_read(mdev, RBBM_INT_0_STATUS);
+    
+    error = request_irq(irq, a6xx_fence_irq, 0, "pd-msm", mdev);
+    if (error != 0)
+        goto out;
+    
+    // Record registration for failure cleanup/teardown
+    st->fence_irq = irq;
+    st->fence_irq_registered = true;
+    
+    gpu_write(mdev, RBBM_INT_0_MASK, INT0_CACHE_FLUSH_TS);
+    (void)gpu_read(mdev, RBBM_INT_0_MASK);
+    
+    mdev->gpu.irq_fences = true;
+    
     dev_info(dev, "a6xx: cp running\n");
 out:
+    // registration occurs only after obtaining OOB. On startup failure, detach before returning
+    // that grant
+    if (error != 0 && oob && st->fence_irq_registered) {
+        int cleanup_status = a6xx_irq_remove_oob_held(mdev);
+        
+        if (cleanup_status != 0) {
+            struct pd_msm_gpu *g = &mdev->gpu;
+            
+            // keep hardware accessible to the retained handler
+            st->oob_retained = true;
+            
+            // start_lock is already held by pd_msm_gpu_start
+            mutex_lock(&g->lock);
+            g->stopping = true;
+            
+            int state = pdos_wait_lock();
+            g->fence_error = cleanup_status;
+            pdos_wakeup(&g->fence_event, 1);
+            pdos_wait_unlock(state);
+            
+            mutex_unlock(&g->lock);
+            
+            dev_err(dev,
+                    "a6xx: startup failed: %d. IRQ cleanup failed: %d. Device disabled\n",
+                    error, cleanup_status);
+            
+            error = cleanup_status;
+        }
+    }
+    
     a6xx_regdump(mdev, st, oob);
     // the gpu oob is handed back on every path once granted
-    if (oob)
+    if (oob && !st->oob_retained)
         a6xx_gmu_oob_gpu(st, false);
     if (sqe != NULL)
         release_firmware(sqe);
@@ -767,6 +876,40 @@ a6xx_dump(struct pd_msm_dev *mdev)
     g->iommu->dump_fault(g->iommu_priv);
 }
 
+// caller holds start_lock, has closed submission admission,
+// and is not running on the interrupt's work-loop thread
+// terminal shutdown: reject new work, wake waiters, detach interrupt and keep GPU resources allocated
+// TODO: Resource reclamation once a hardware stop/reset sequence is verified.
+static int
+a6xx_irq_stop(struct pd_msm_dev *mdev)
+{
+    struct a6xx_state *st = mdev->gpu.gen;
+    int error;
+    
+    if (!st->fence_irq_registered && !st->oob_retained)
+        return 0;
+    
+    if (!st->oob_retained) {
+        // Hold GPU accessibility across register writes and callback drain
+        // This must precede clocks/power removal
+        error = a6xx_gmu_oob_gpu(st, true);
+        if (error != 0)
+            return error; // report failure and retain device/resources
+        
+        st->oob_retained = true;
+    }
+    
+    error = a6xx_irq_remove_oob_held(mdev);
+    if (error != 0)
+        return error;
+    
+    error = a6xx_gmu_oob_gpu(st, false);
+    if (error == 0)
+        st->oob_retained = false;
+    
+    return error;
+}
+
 const struct pd_msm_gpu_funcs pd_msm_a6xx_funcs = {
     .init = a6xx_init,
     .start = a6xx_start,
@@ -775,4 +918,5 @@ const struct pd_msm_gpu_funcs pd_msm_a6xx_funcs = {
     .fence_ack = a6xx_fence_ack,
     .dump = a6xx_dump,
     .selftest_ib = a6xx_selftest_ib,
+    .irq_stop = a6xx_irq_stop,
 };

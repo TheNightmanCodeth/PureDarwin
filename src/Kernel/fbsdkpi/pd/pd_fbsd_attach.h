@@ -41,6 +41,8 @@ struct pd_fbsd_platform {
 // attached struct device or NULL
 void *pd_fbsd_attach_platform_device(const struct pd_fbsd_platform *pd);
 
+void pd_fbsd_shutdown_platform_device(void *cookie);
+
 // ties an ifnet to its iokit controller for receive and link callbacks
 void pd_fbsd_set_cookie(void *ifp, void *cookie);
 

@@ -75,6 +75,13 @@ static void __exit _drv##_exit(void) { platform_driver_unregister(&(_drv)); } \
 module_init(_drv##_init);						\
 module_exit(_drv##_exit)
 
+/*
+ * PureDarwin: synchronously remove a platform IRQ registration.
+ * Returns 0 on success or a negative errno.
+ * On failure, registration state is retained.
+ */
+int pd_platform_free_irq_checked(unsigned int irq, void *arg);
+
 struct resource *platform_get_resource(struct platform_device *, unsigned int, unsigned int);
 struct resource *platform_get_resource_byname(struct platform_device *, unsigned int, const char *);
 int platform_get_irq(struct platform_device *, unsigned int);

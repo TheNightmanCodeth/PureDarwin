@@ -120,7 +120,7 @@ int pdos_pci_msix_count(void *dev);
 // pci index 0 is the legacy line and 1 up are msi vectors, a device tree index n is the n-th interrupt
 typedef int (*pdos_intr_fn)(void *arg);
 void *pdos_intr_install(void *dev, int index, pdos_intr_fn fn, void *arg);
-void pdos_intr_remove(void *cookie);
+int pdos_intr_remove(void *cookie);
 
 // device tree, a node is an opaque IORegistryEntry in the device tree plane
 // property data stays valid while the node does, returns 0 when found

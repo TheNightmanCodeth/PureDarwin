@@ -38,6 +38,9 @@ struct a6xx_state {
     struct pd_msm_bo        *sqe;           // the sqe image from file byte 4 (spec 4.2)
     u64                     zap_phys;       // the gpu's zap-shader memory-region (gpu-mem@8bf00000)
     u32                     zap_size;
+    int                     fence_irq;
+    bool                    fence_irq_registered;
+    bool                    oob_retained; // protected by start_lock. retained across failed IRQ removal
 };
 
 static inline u32

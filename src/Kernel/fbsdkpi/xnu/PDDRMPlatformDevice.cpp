@@ -26,9 +26,11 @@ public:
 #endif
 	bool start(IOService *provider) override;
 	void systemWillShutdown(IOOptionBits specifier) override;
+    void stop(IOService *provider) override;
 
 private:
-	void *fDevice;
+	void *fDevice = nullptr;
+    bool fPMInitialized = false;
 };
 
 OSDefineMetaClassAndStructors(PDFBSD_CLASS, IOService);
@@ -197,6 +199,25 @@ PDFBSD_CLASS::start(IOService *provider)
 	for (int i = 0; i < pd.nmem; i++)
 		IOLog(PDDRM_NAME ":   reg %d: 0x%llx size 0x%llx\n", i, pd.mem_phys[i], pd.mem_size[i]);
 
+    static IOPMPowerState states[2] = {
+        { kIOPMPowerStateVersion1, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0 },
+        { kIOPMPowerStateVersion1, kIOPMPowerOn, kIOPMPowerOn, kIOPMPowerOn,
+            0, 0, 0, 0, 0, 0, 0, 0 },
+    };
+    
+    PMinit();
+    fPMInitialized = true;
+    provider->joinPMtree(this);
+    
+    IOReturn pmError = registerPowerDriver(this, states, 2);
+    if (pmError != kIOReturnSuccess) {
+        IOLog(PDDRM_NAME ": power registration failed: 0x%x\n", (unsigned int)pmError);
+        PMstop();
+        fPMInitialized = false;
+        return false;
+    }
+    
 	setProperty("PDDRMState", "init");
 	pdos_xnu_init();
 	setProperty("PDDRMState", "attaching");
@@ -207,6 +228,12 @@ PDFBSD_CLASS::start(IOService *provider)
 	setProperty("PDDRMState", fDevice != NULL ? "attached" : "failed");
 	if (fDevice == NULL) {
 		IOLog(PDDRM_NAME ": no linux driver attached\n");
+        
+        if (fPMInitialized) {
+            PMstop();
+            fPMInitialized = false;
+        }
+        
 		return false;
 	}
 	IOLog(PDDRM_NAME ": attached\n");
@@ -217,5 +244,24 @@ PDFBSD_CLASS::start(IOService *provider)
 void
 PDFBSD_CLASS::systemWillShutdown(IOOptionBits specifier)
 {
-	IOService::systemWillShutdown(specifier);
+    if (fDevice != NULL) {
+        IOLog(PDDRM_NAME ": shutting down driver\n");
+        pd_fbsd_shutdown_platform_device(fDevice);
+    }
+    
+    IOService::systemWillShutdown(specifier);
+}
+
+void
+PDFBSD_CLASS::stop(IOService *provider)
+{
+    if (fDevice != nullptr)
+        pd_fbsd_shutdown_platform_device(fDevice);
+    
+    if (fPMInitialized) {
+        PMstop();
+        fPMInitialized = false;
+    }
+    
+    IOService::stop(provider);
 }

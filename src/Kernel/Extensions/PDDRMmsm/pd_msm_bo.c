@@ -215,7 +215,7 @@ mmap_release(void *arg)
 
 // the pages behind an mmap offset of /dev/dri: the bo's own, write-combined
 static int
-pd_msm_mmap_pages(struct linux_file *filp, off_t offset, size_t size, int prot,
+pd_msm_mmap_pages_impl(struct linux_file *filp, off_t offset, size_t size, int prot,
     uint32_t *pages, unsigned int *wimg, void (**release)(void *), void **release_arg)
 {
 	struct drm_file *priv = filp->private_data;
@@ -250,6 +250,27 @@ pd_msm_mmap_pages(struct linux_file *filp, off_t offset, size_t size, int prot,
 	*release = mmap_release;
 	*release_arg = obj;
 	return (0);
+}
+
+static int
+pd_msm_mmap_pages(struct linux_file *filp, off_t offset, size_t size, int prot,
+    uint32_t *pages, unsigned int *wimg, void (**release)(void *), void **release_arg)
+{
+    struct drm_file *priv = filp->private_data;
+    struct pd_msm_dev *mdev = to_pd_msm(priv->minor->dev);
+    int error;
+    
+    *release = NULL;
+    *release_arg = NULL;
+    
+    error = pd_msm_op_enter(mdev);
+    if (error != 0)
+        return error;
+    
+    error = pd_msm_mmap_pages_impl(filp, offset, size, prot, pages, wimg, release, release_arg);
+    
+    pd_msm_op_leave(mdev);
+    return error;
 }
 
 void
