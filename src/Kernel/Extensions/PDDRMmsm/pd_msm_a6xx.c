@@ -14,24 +14,64 @@
 #include "pd_msm_a6xx_regs.h"
 
 #define RING_BYTES                      (32 * 1024)     // spec 4.3
-#define GMU_GX_SPTPRAC_CLOCK_CONTROL    0x1a880
-#define GMU_CX_POWER_COUNTER_ENABLE     0x1f840
-#define GMU_CX_POWER_COUNTER_SELECT_0   0x1f841
-#define GMU_AO_CGC_MODE_CNTL            0x23b09
-#define GMU_AO_CGC_DELAY_CNTL           0x23b0a
-#define GMU_AO_CGC_HYST_CNTL            0x23b0b
-#define GMU_AO_GPU_CX_BUSY_STATUS       0x23b0c
-#define GMU_AO_GPU_CX_BUSY_MASK         0x23b0e
-#define GMU_AHB_FENCE_STATUS            0x23b13
+
+#define CP_AHB_CNTL                     0x098d
+#define CP_APRIV_CNTL                   0x0844
+#define CP_CHICKEN_DBG                  0x0841
+#define CP_MEM_POOL_SIZE                0x08c3
+#define CP_PERFCTR_CP_SEL               0x08d0
+#define CP_PROTECT_CNTL                 0x084f
 #define CP_RB_BASE                      0x0800
 #define CP_RB_CNTL                      0x0802
 #define CP_RB_RPTR_ADDR                 0x0804
 #define CP_RB_WPTR                      0x0807
+#define CP_ROQ_THRESHOLDS_1             0x08c1
+#define CP_ROQ_THRESHOLDS_2             0x08c2
 #define CP_SQE_CNTL                     0x0808
 #define CP_SQE_INSTR_BASE               0x0830
+#define GBIF_HALT                       0x3c45
+#define GMU_AHB_FENCE_STATUS            0x23b13
+#define GMU_AO_CGC_DELAY_CNTL           0x23b0a
+#define GMU_AO_CGC_HYST_CNTL            0x23b0b
+#define GMU_AO_CGC_MODE_CNTL            0x23b09
+#define GMU_AO_GPU_CX_BUSY_MASK         0x23b0e
+#define GMU_AO_GPU_CX_BUSY_STATUS       0x23b0c
+#define GMU_CX_POWER_COUNTER_ENABLE     0x1f840
+#define GMU_CX_POWER_COUNTER_SELECT_0   0x1f841
+#define GMU_GX_SPTPRAC_CLOCK_CONTROL    0x1a880
+#define PC_DBG_ECO_CNTL                 0x9e00
+#define RB_NC_MODE_CNTL                 0x8e08
+#define RBBM_CLOCK_CNTL                 0x00ae
+#define RBBM_CLOCK_CNTL_GMU_GX          0x0118
+#define RBBM_CLOCK_DELAY_GMU_GX         0x0119
+#define RBBM_CLOCK_HYST_GMU_GX          0x011a
+#define RBBM_GBIF_CLIENT_QOS_CNTL       0x0011
+#define RBBM_GBIF_HALT                  0x0016
+#define RBBM_INT_0_MASK                 0x0038
 #define RBBM_INT_0_STATUS               0x0201
+#define RBBM_INTERFACE_HANG_INT_CNTL    0x001f
+#define RBBM_ISDB_CNT                   0x0533
+#define RBBM_NC_MODE_CNTL               0x0534
+#define RBBM_PERFCTR_CNTL               0x0500
+#define RBBM_PERFCTR_GPU_BUSY_MASKED    0x050b
+#define RBBM_RAC_THRESHOLD_CNT          0x0044
+#define RBBM_SECVID_TSB_CNTL            0xf803
+#define RBBM_SECVID_TSB_TRUSTED_BASE    0xf800
+#define RBBM_SECVID_TSB_TRUSTED_SIZE    0xf802
+#define RBBM_SP_HYST_CNT                0x0042
 #define RBBM_STATUS                     0x0210
 #define RBBM_STATUS3                    0x0213
+#define SP_NC_MODE_CNTL                 0xae02
+#define TPL1_BICUBIC_WEIGHTS_TABLE      0xb608
+#define TPL1_NC_MODE_CNTL               0xb604
+#define UCHE_CACHE_WAYS                 0x0e17
+#define UCHE_CLIENT_PF                  0x0e19
+#define UCHE_CMDQ_CONFIG                0x0e3c
+#define UCHE_FILTER_CNTL                0x0e18
+#define UCHE_MODE_CNTL                  0x0e01
+#define UCHE_TRAP_BASE                  0x0e09
+#define UCHE_WRITE_RANGE_MAX            0x0e05
+#define UCHE_WRITE_THRU_BASE            0x0e07
 
 #define RING_DWORDS                     (RING_BYTES / 4)
 #define RB_CNTL_32K                     0x0000020c
@@ -172,82 +212,89 @@ a6xx_sip_c1b(void)
     return (out[0] == 0 ? 0 : -EIO);
 }
 
-#define RBBM_INT_0_MASK 0x0038
-
 static int
 a6xx_hw_init(struct pd_msm_dev *mdev, struct a6xx_state *st)
 {
     int i;
     
-    gpu_write(mdev, 0x3c45, 0);                     // GBIF_HALT
-    gpu_write(mdev, 0x0016, 0);                     // RBBM_GBIF_HALT
-    if (gpu_read(mdev, 0x3c45) != 0 || gpu_read(mdev, 0x0016) != 0)
+    // clear GBIF_HALT
+    gpu_write(mdev, GBIF_HALT, 0);
+    gpu_write(mdev, RBBM_GBIF_HALT, 0);
+    
+    if (gpu_read(mdev, GBIF_HALT) != 0 || gpu_read(mdev, RBBM_GBIF_HALT) != 0)
         printf("pd msm: a6xx: gbif halt did not clear\n");
-    gpu_write(mdev, 0xf803, 0);
-    gpu_write64(mdev, 0xf800, 0);
-    gpu_write(mdev, 0xf802, 0);
+    // clear secvid_tsb
+    gpu_write(mdev, RBBM_SECVID_TSB_CNTL, 0);
+    gpu_write64(mdev, RBBM_SECVID_TSB_TRUSTED_BASE, 0);
+    gpu_write(mdev, RBBM_SECVID_TSB_TRUSTED_SIZE, 0);
+    
     for (i = 0; i < nitems(sAddrModeCntl); i++)
         gpu_write(mdev, sAddrModeCntl[i], 1);
     
-    // clock gating, as observed on x13s
+    // clock gating (as observed on x13s)
+    // TODO: Is this the same on other a6xx ?
     gmu_write(st, GMU_AO_CGC_MODE_CNTL, 0x00020200);
     gmu_write(st, GMU_AO_CGC_DELAY_CNTL, 0x00010111);
     gmu_write(st, GMU_AO_CGC_HYST_CNTL, 0x00005555);
     gmu_write(st, GMU_GX_SPTPRAC_CLOCK_CONTROL, 0);
+    
     for (i = 0; i < nitems(sHwcg); i++)
         gpu_write(mdev, sHwcg[i].reg, sHwcg[i].v);
-    gpu_write(mdev, 0x00ae, 0x8aa8aa82);
-    gpu_write(mdev, 0x0533, 0x00000182);
-    gpu_write(mdev, 0x0044, 0);
-    gpu_write(mdev, 0x0042, 0);
-    gpu_write(mdev, 0x0118, 0x00000222);
-    gpu_write(mdev, 0x0119, 0x00000111);
-    gpu_write(mdev, 0x011a, 0x00000555);
+    
+    gpu_write(mdev, RBBM_CLOCK_CNTL, 0x8aa8aa82);
+    gpu_write(mdev, RBBM_ISDB_CNT, 0x00000182);
+    gpu_write(mdev, RBBM_RAC_THRESHOLD_CNT, 0);
+    gpu_write(mdev, RBBM_SP_HYST_CNT, 0);
+    gpu_write(mdev, RBBM_CLOCK_CNTL_GMU_GX, 0x00000222);
+    gpu_write(mdev, RBBM_CLOCK_DELAY_GMU_GX, 0x00000111);
+    gpu_write(mdev, RBBM_CLOCK_HYST_GMU_GX, 0x00000555);
     gmu_write(st, GMU_GX_SPTPRAC_CLOCK_CONTROL, 1);
-    gpu_write(mdev, 0x00ae, 0x8aa8aa82);
+    gpu_write(mdev, RBBM_CLOCK_CNTL, 0x8aa8aa82);
     
-    gpu_write(mdev, 0x0011, 3);
-    gpu_write(mdev, 0x050b, 0xffffffff);
+    gpu_write(mdev, RBBM_GBIF_CLIENT_QOS_CNTL, 3);
+    gpu_write(mdev, RBBM_PERFCTR_GPU_BUSY_MASKED, 0xffffffff);
     
-    gpu_write64(mdev, 0x0e05, 0x0000ffffffffffc0ull);
-    gpu_write64(mdev, 0x0e09, 0x0000fffffffff000ull);
-    gpu_write64(mdev, 0x0e07, 0x0000fffffffff000ull);
-    gpu_write(mdev, 0x0e18, 0x00000804);
-    gpu_write(mdev, 0x0e17, 0x00000004);
-    gpu_write(mdev, 0x08c2, 0x02000140);
-    gpu_write(mdev, 0x08c1, 0x8040362c);
+    gpu_write64(mdev, UCHE_WRITE_RANGE_MAX, 0x0000ffffffffffc0ull);
+    gpu_write64(mdev, UCHE_TRAP_BASE, 0x0000fffffffff000ull);
+    gpu_write64(mdev, UCHE_WRITE_THRU_BASE, 0x0000fffffffff000ull);
+    gpu_write(mdev, UCHE_FILTER_CNTL, 0x00000804);
+    gpu_write(mdev, UCHE_CACHE_WAYS, 0x00000004);
+    gpu_write(mdev, CP_ROQ_THRESHOLDS_2, 0x02000140);
+    gpu_write(mdev, CP_ROQ_THRESHOLDS_1, 0x8040362c);
+    // unnamed for A6XX but the XML names CP_LPAC_PROG_FIFO_SIZE for A7XX
     gpu_write(mdev, 0x0b34, 0x00000020);
-    gpu_write(mdev, 0x08c3, 0x00000080);
-    gpu_write(mdev, 0x9e00, 0x00800200);
-    gpu_write(mdev, 0x098d, 0x00000001);
-    gpu_write(mdev, 0x0500, 0x00000001);
-    gpu_write(mdev, 0x08d0, 0);
-    gpu_write(mdev, 0x8e08, 0x00000816);
-    gpu_write(mdev, 0xb604, 0x00000006);
-    gpu_write(mdev, 0xae02, 0x00000026);
-    gpu_write(mdev, 0x0e01, 0x00600000);
-    gpu_write(mdev, 0x0534, 0x00000001);
-    gpu_write(mdev, 0x001f, 0x404fffff);
-    gpu_write(mdev, 0x0e19, 0x00000081);
+    gpu_write(mdev, CP_MEM_POOL_SIZE, 0x00000080);
+    gpu_write(mdev, PC_DBG_ECO_CNTL, 0x00800200);
+    gpu_write(mdev, CP_AHB_CNTL, 0x00000001);
+    gpu_write(mdev, RBBM_PERFCTR_CNTL, 0x00000001);
+    gpu_write(mdev, CP_PERFCTR_CP_SEL, 0);
+    gpu_write(mdev, RB_NC_MODE_CNTL, 0x00000816);
+    gpu_write(mdev, TPL1_NC_MODE_CNTL, 0x00000006);
+    gpu_write(mdev, SP_NC_MODE_CNTL, 0x00000026);
+    gpu_write(mdev, UCHE_MODE_CNTL, 0x00600000);
+    gpu_write(mdev, RBBM_NC_MODE_CNTL, 0x00000001);
+    gpu_write(mdev, RBBM_INTERFACE_HANG_INT_CNTL, 0x404fffff);
+    gpu_write(mdev, UCHE_CLIENT_PF, 0x00000081);
+    
     for (i = 0; i < nitems(sBicubic); i++)
-        gpu_write(mdev, 0xb608 + i, sBicubic[i]);
+        gpu_write(mdev, TPL1_BICUBIC_WEIGHTS_TABLE + i, sBicubic[i]);
     
     gmu_write(st, GMU_AO_GPU_CX_BUSY_MASK, 0xff000000);
     gmu_write(st, GMU_CX_POWER_COUNTER_SELECT_0, 0x00000020);
     gmu_write(st, GMU_CX_POWER_COUNTER_ENABLE, 1);
     
-    gpu_write(mdev, 0x084f, 0x0000000b);
+    gpu_write(mdev, CP_PROTECT_CNTL, 0x0000000b);
     for (i = 0; i < nitems(sProtect); i++)
         gpu_write(mdev, 0x0850 + i, sProtect[i]);
     for (i = 0; i < nitems(sProtectExtra); i++)
         gpu_write(mdev, sProtectExtra[i].reg, sProtectExtra[i].v);
     
-    gpu_write(mdev, 0x0841, 0x00028801);
-    gpu_write(mdev, 0x0011, 0);
-    gpu_write(mdev, 0x0e3c, 0x00000090);
-    gpu_write(mdev, 0x0844, 0x0000006e);
+    gpu_write(mdev, CP_CHICKEN_DBG, 0x00028801);
+    gpu_write(mdev, RBBM_GBIF_CLIENT_QOS_CNTL, 0);
+    gpu_write(mdev, UCHE_CMDQ_CONFIG, 0x00000090);
+    gpu_write(mdev, CP_APRIV_CNTL, 0x0000006e);
     gpu_write(mdev, RBBM_INT_0_MASK, 0);
-//    gpu_write(mdev, 0x0038, 0x03d0e242);
+//    gpu_write(mdev, RBBM_INT_0_MASK, 0x03d0e242);
     
     printf("pd msm: a6xx: gpu registers set, rbbm_status 0x%08x\n", gpu_read(mdev, 0x0210));
     return (a6xx_sip_c1b());
