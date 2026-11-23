@@ -58,6 +58,7 @@
 , tx1DesktopArm64Bundle ? null
 , a690GlArm64Bundle ? null
 , argonMsmArm64Bundle ? null
+, argonDesktopMsmArm64Bundle
 , kextsBuild
 , lib
 , nixPortPackages
@@ -1027,7 +1028,8 @@ let
         baseSystem = splitBaseSystemArm64Sc8280xp;
         extraPackages = [ zshArm64Build libiconvArm64Build toyboxArm64Build adrenoFirmwareBuild ]
           ++ lib.optional (a690GlArm64Bundle != null) a690GlArm64Bundle
-          ++ lib.optional (argonMsmArm64Bundle != null) argonMsmArm64Bundle;
+          ++ lib.optional (argonMsmArm64Bundle != null) argonMsmArm64Bundle
+          ++ [ argonDesktopMsmArm64Bundle ];
         kc = kcArm64Sc8280xpReleaseBuild;
         xnuLoader = xnuLoaderArm64Sc8280xp;
         apfsprogs = pkgs.apfsprogs;

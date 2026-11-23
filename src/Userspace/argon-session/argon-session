@@ -12,7 +12,7 @@ mkdir -p -m 0700 "$XDG_RUNTIME_DIR" || exit 1
 
 # an image can give the compositor its own environment and log, its GL drivers or ARGON_GFX
 NEUSWC_ENV=
-NEUSWC_LOG=/dev/stderr
+NEUSWC_LOG=
 [ -r /etc/neuswc.env ] && . /etc/neuswc.env
 # the user's choice of render GPU and compositing, GPU=... and GFX=... lines a Settings pane can write,
 # after the image's defaults so it wins
@@ -22,7 +22,11 @@ argon_gpu=$(argon_key GPU)
 argon_gfx=$(argon_key GFX)
 [ -n "$argon_gpu" ] && NEUSWC_ENV="$NEUSWC_ENV ARGON_GPU=$argon_gpu"
 [ -n "$argon_gfx" ] && NEUSWC_ENV="$NEUSWC_ENV ARGON_GFX=$argon_gfx"
-env $NEUSWC_ENV /bin/neuswc 2>>"$NEUSWC_LOG" &
+if [ -n "$NEUSWC_LOG" ]; then
+    env $NEUSWC_ENV /bin/neuswc 2>>"$NEUSWC_LOG" &
+else
+    env $NEUSWC_ENV /bin/neuswc &
+fi
 compositor=$!
 
 # how toolkits and tools such as fastfetch tell which desktop they run in
