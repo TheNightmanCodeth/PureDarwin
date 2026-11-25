@@ -62,6 +62,8 @@ struct pd_msm_gpu_funcs {
 	void			(*dump)(struct pd_msm_dev *mdev);
     // the self-test's ib: a marker write of value to dst, returns its length in dwords
     u32             (*selftest_ib)(u32 *ib, u64 dst, u32 value);
+    // count copies of value written from dst on: one packet, returns its length in dwords
+    u32         (*fill_ib)(u32 *ib, u64 dst, u32 value, u32 count);
     int         (*irq_stop)(struct pd_msm_dev *mdev);
 };
 
@@ -131,10 +133,16 @@ void pd_msm_dma_free(void *cpu, void *alloc, size_t size);
 // a kernel bo is one contiguous piece with a cpu view, a user one any pieces and none
 #define PD_MSM_BO_KERNEL	0x80000000u
 struct pd_msm_bo *pd_msm_bo_new(struct drm_device *drm, size_t size, u32 flags);
+struct pd_msm_bo *pd_msm_bo_wrap(struct drm_device *drm, u64 phys, size_t size);
 int pd_msm_bo_iova(struct pd_msm_dev *mdev, struct pd_msm_bo *bo);
 void pd_msm_mmap_register(void);
 extern const struct drm_gem_object_funcs pd_msm_bo_funcs;
 extern u64 pd_msm_dma_max;
+
+// pd_msm_fb.c: the boot framebuffer as PDDRMFramebuffer's display client (pdmsmfb=1)
+void pd_msm_fb_register(struct pd_msm_dev *mdev);
+// its gem object, NULL when there is no client
+struct pd_msm_bo *pd_msm_fb_bo(u32 *width, u32 *height, u32 *pitch);
 
 // pd_msm_gpu.c: what every generation shares
 int pd_msm_gpu_init(struct pd_msm_dev *mdev);

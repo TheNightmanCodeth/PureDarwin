@@ -94,7 +94,8 @@ bo_free(struct drm_gem_object *obj)
 		pd_msm_dma_free(bo->cpu, bo->chunks[0].alloc, obj->size);
 	else
 		for (u32 i = 0; i < bo->nchunks; i++)
-			pdos_free_contig(bo->chunks[i].alloc, bo->chunks[i].size);
+            if (bo->chunks[i].alloc != NULL)
+                pdos_free_contig(bo->chunks[i].alloc, bo->chunks[i].size);
 	kvfree(bo->chunks);
 	kfree(bo);
 }
@@ -175,6 +176,36 @@ pd_msm_bo_new(struct drm_device *drm, size_t size, u32 flags)
 	return (bo);
 }
 
+// a gem object over memory this driver did not allocate (the boot framebuffer)
+// alloc is NULL so bo_free leaves it alone
+struct pd_msm_bo *
+pd_msm_bo_wrap(struct drm_device *drm, u64 phys, size_t size)
+{
+    struct pd_msm_bo *bo;
+    
+    if (size == 0 || ((phys | size) & 0xfff) != 0)
+        return ERR_PTR(-EINVAL);
+    bo = kzalloc(sizeof(*bo), GFP_KERNEL);
+    if (bo == NULL)
+        return ERR_PTR(-ENOMEM);
+    bo->chunks = kvmalloc_array(1, sizeof(*bo->chunks), GFP_KERNEL);
+    if (bo->chunks == NULL) {
+        kfree(bo);
+        return ERR_PTR(-ENOMEM);
+    }
+    bo->chunks[0].phys = phys;
+    bo->chunks[0].size = size;
+    bo->chunks[0].alloc = NULL;
+    bo->nchunks = 1;
+    bo->base.funcs = &pd_msm_bo_funcs;
+    drm_gem_private_object_init(drm, &bo->base, size);
+    if (drm_gem_create_mmap_offset(&bo->base) != 0) {
+        drm_gem_object_put(&bo->base);
+        return ERR_PTR(-ENOMEM);
+    }
+    return bo;
+}
+
 // a gpu address on first need: a simple rising allocator, freed space is not reused yet
 int
 pd_msm_bo_iova(struct pd_msm_dev *mdev, struct pd_msm_bo *bo)
@@ -239,6 +270,13 @@ pd_msm_mmap_pages_impl(struct linux_file *filp, off_t offset, size_t size, int p
 		return (-EACCES);
 	}
 	struct pd_msm_bo *bo = to_pd_msm_bo(obj);
+    // XNU has to list in whole 16 KB pages
+    for (u32 k = 0; k < bo->nchunks; k++) {
+        if (((bo->chunks[k].phys | bo->chunks[k].size) & (XNU_PAGE_SIZE - 1)) != 0) {
+            drm_gem_object_put(obj);
+            return -EINVAL;
+        }
+    }
 	for (unsigned long i = 0, c = 0, in = 0; i < npages; i++, in++) {
 		if (in == bo->chunks[c].size >> XNU_PAGE_SHIFT) {
 			c++;

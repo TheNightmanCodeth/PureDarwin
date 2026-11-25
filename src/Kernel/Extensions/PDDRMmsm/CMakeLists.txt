@@ -39,10 +39,10 @@ _fbsdkpi_objects(PDDRMmsm_drm SOURCES ${core}
 
 # the driver itself, clean room from the adreno-cleanroom spec
 set(msmsrc pd_msm_drv.c pd_msm_bo.c pd_msm_gpu.c pd_msm_smmu.c pd_msm_a3xx.c pd_msm_gcc8916.c
-    pd_msm_smmu500.c pd_msm_gpucc8280.c pd_msm_a6xx.c pd_msm_a6xx_gmu.c)
+    pd_msm_smmu500.c pd_msm_gpucc8280.c pd_msm_a6xx.c pd_msm_a6xx_gmu.c pd_msm_fb.c)
 list(TRANSFORM msmsrc PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
 _fbsdkpi_objects(PDDRMmsm_msm SOURCES ${msmsrc}
-    INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/include/uapi" "${drmkmod}/include/uapi/drm" ${lkpiinc} ${coreinc}
+    INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/include/uapi" "${drmkmod}/include/uapi/drm" "${CMAKE_CURRENT_SOURCE_DIR}/../../fbsdkpi/drm/include" ${lkpiinc} ${coreinc}
     DEFINITIONS FBSD_DRIVER=1 _XOPEN_SOURCE ${drmdefs}
         KBUILD_MODNAME=\"msm\" LINUXKPI_PARAM_PREFIX=msm_
     OPTIONS ${lkpiopt})
@@ -58,6 +58,8 @@ add_fbsdkpi_driver(PDDRMmsm
     LKPI_OPTIONS ${drmopts}
     OBJECTS PDDRMmsm_drm PDDRMmsm_msm
     XNU_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../../fbsdkpi/xnu/PDDRMPlatformDevice.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../fbsdkpi/xnu/PDDRMFramebuffer.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/pd_msm_bootfb.cpp"
 )
 
 # the adreno attaches only when asked to with the pdmsm=1 boot-arg
@@ -65,4 +67,5 @@ target_compile_definitions(PDDRMmsm.kext PRIVATE PDDRM_OPT_IN_BOOTARG="pdmsm"
     PDDRMFramebuffer=PDDRMFramebufferMsm PDDRMPresenter=PDDRMPresenterMsm)
 target_include_directories(PDDRMmsm.kext PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../IOGraphicsFamily"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../IOHIDFamily/IOHIDSystem"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../fbsdkpi/drm/include")

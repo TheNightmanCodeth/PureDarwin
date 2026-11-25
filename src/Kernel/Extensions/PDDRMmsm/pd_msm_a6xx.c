@@ -599,6 +599,17 @@ a6xx_selftest_ib(u32 *ib, u64 dst, u32 value)
     return 4;
 }
 
+static u32
+a6xx_fill_ib(u32 *ib, u64 dst, u32 value, u32 count)
+{
+    ib[0] = pkt7(CP_MEM_WRITE, 2 + count);
+    ib[1] = (u32)dst;
+    ib[2] = (u32)(dst >> 32);
+    for (u32 i = 0; i < count; i++)
+        ib[3 + i] = value;
+    return (3 + count);
+}
+
 #ifdef PD_MSM_HOST_TEST
 // the linux host tests stand in for secure firmware
 void pd_msm_test_smc(const u64 in[7], u64 out[4], u64 *out6);
@@ -960,5 +971,6 @@ const struct pd_msm_gpu_funcs pd_msm_a6xx_funcs = {
     .fence_ack = a6xx_fence_ack,
     .dump = a6xx_dump,
     .selftest_ib = a6xx_selftest_ib,
+    .fill_ib = a6xx_fill_ib,
     .irq_stop = a6xx_irq_stop,
 };

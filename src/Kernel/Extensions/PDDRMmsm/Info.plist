@@ -39,6 +39,15 @@
             <key>IOProviderClass</key>
             <string>IOPlatformDevice</string>
         </dict>
+        <key>PDDRMFramebuffer</key>
+        <dict>
+            <key>CFBundleIdentifier</key>
+            <string>org.puredarwin.driver.PDDRMmsm</string>
+            <key>IOClass</key>
+            <string>PDDRMFramebufferMsm</string>
+            <key>IOProviderClass</key>
+            <string>PDDRMmsm</string>
+        </dict>
     </dict>
     <key>OSBundleLibraries</key>
     <dict>

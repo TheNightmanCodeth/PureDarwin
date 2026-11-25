@@ -505,6 +505,7 @@ pd_msm_probe(struct platform_device *pdev)
 		return (error);
 	}
 	pd_msm_mmap_register();
+    pd_msm_fb_register(mdev);
 	if ((error = drm_dev_register(&mdev->drm, 0)) != 0) {
 		dev_err(&pdev->dev, "drm_dev_register: %d\n", error);
 		return (error);

@@ -44,6 +44,46 @@ pd_msm_op_leave(struct pd_msm_dev *mdev)
     pdos_wait_unlock(state);
 }
 
+// pdmsmtest = 2: a box the gpu writes straight into the boot framebuffer, 32px in from the top right
+static void
+selftest_box(struct pd_msm_dev *mdev)
+{
+    const struct pd_msm_gpu_funcs *f = mdev->info->funcs;
+    const u32 w = 256, h = 64, color = 0x00ff8000; // orange
+    struct pd_msm_bo *fb, *ib;
+    u32 width, height, pitch, n = 0, seqno;
+    u64 iova;
+    int error;
+    
+    if (f->fill_ib == NULL || pdos_bootarg_int("pdmsmtest", 0) != 2)
+        return;
+    if ((fb = pd_msm_fb_bo(&width, &height, &pitch)) == NULL) {
+        printf("pd msm: selftest: no boot framebuffer to draw in (pdmsmfb=1?)\n");
+        return;
+    }
+    ib = pd_msm_bo_new(&mdev->drm, h * (3 + w) * 4, PD_MSM_BO_KERNEL);
+    if (IS_ERR(ib) || pd_msm_bo_iova(mdev, ib) != 0 || pd_msm_bo_iova(mdev, fb) != 0) {
+        printf("pd msm: selftest: box: no buffers\n");
+        return;
+    }
+    for (u32 y = 0; y < h; y++) {
+        u64 dst = fb->iova + (u64)(32 + y) * pitch + (u64)(width - w - 32) * 4;
+        
+        n += f->fill_ib((u32 *)ib->cpu + n, dst, color, w);
+    }
+    iova = ib->iova;
+    struct pd_msm_bo *submit_bos[] = { fb, ib };
+    wmb();
+    if ((error = pd_msm_gpu_submit(mdev, NULL, &iova, &n, 1, submit_bos, nitems(submit_bos), &seqno)) != 0) {
+        printf("pd msm: selftest: box: submit %d\n", error);
+        return;
+    }
+    error = pd_msm_gpu_wait(mdev, seqno, 1000000000);
+    printf("pd msm: selftest: box %ux%u into fb iova 0x%llx (phys 0x%llx), %u dwords, seqno %u %s\n",
+           w, h, (unsigned long long)fb->iova, (unsigned long long)fb->chunks[0].phys, n, seqno,
+           error == 0 ? "signalled" : "timed out");
+}
+
 static void
 selftest(struct pd_msm_dev *mdev)
 {
@@ -77,6 +117,7 @@ selftest(struct pd_msm_dev *mdev)
     printf("pd msm: selftest: ib 0x%llx %u dwords, seqno %u %s, marker 0x%08x (%s)\n",
            (unsigned long long)iova, n, seqno, error == 0 ? "signalled" : "timed out", got,
            got == 0xc0ffee01 ? "written" : "not written");
+    selftest_box(mdev);
 }
 
 
