@@ -58,3 +58,12 @@ The kernel extension is split into what every Adreno shares and what one generat
 - SoC clock and power providers register by compatible string. pd_msm_gcc8916.c is the one for msm8916, and another SoC adds its own file next to it.
 
 Each new piece needs its own spec here first, written from the allowed sources and from observations, as described above.
+
+Display bring-up is tracked separately in sc8280xp-display.md. Version 0.7 adds
+PureDarwin's experiments on the inherited panel pipeline: vsync delivery,
+translated scanout through MDSS context bank 4, and commit retirement traced
+by the SMMU, with GPU-rendered buffers. Its section 18 gives the contract a
+first page-flip driver may rely on and the items still open (page-granular
+mappings, SMMU ownership, vblank counting). Mode setting and firmware handoff
+beyond the inherited state remain unestablished. The raw display archive stays
+outside the tree.
